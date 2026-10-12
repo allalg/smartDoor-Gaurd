@@ -1,0 +1,11 @@
+
+project_id = "kruxomreotxjjyuiafun"
+
+[functions.issue-auth-session]
+verify_jwt = true
+
+[functions.verify-door-auth]
+verify_jwt = false
+
+[functions.admin-actions]
+verify_jwt = true
