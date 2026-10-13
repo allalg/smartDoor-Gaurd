@@ -96,7 +96,7 @@ export const Dashboard: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-white">Preferred Entry Track</h3>
-                  <p className="text-xs text-slate-400">Triggers via IFTTT webhook upon verified entry</p>
+                  <p className="text-xs text-slate-400">Plays directly on Spotify Connect device upon verified entry</p>
                 </div>
               </div>
 
@@ -110,16 +110,34 @@ export const Dashboard: React.FC = () => {
             </div>
 
             {music?.spotify_uri ? (
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-xs text-slate-400">Configured URI</div>
-                  <div className="font-mono text-xs text-emerald-400">{music.spotify_uri}</div>
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800/80 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  {music.artwork_url ? (
+                    <img
+                      src={music.artwork_url}
+                      alt={music.track_title || 'Album cover'}
+                      className="h-11 w-11 rounded-lg object-cover border border-slate-800 shrink-0"
+                    />
+                  ) : (
+                    <div className="h-11 w-11 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
+                      <Music className="h-5 w-5" />
+                    </div>
+                  )}
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="font-medium text-xs text-slate-100 truncate">
+                      {music.track_title || 'Selected Spotify track'}
+                    </div>
+                    <div className="text-[11px] text-slate-400 truncate">
+                      {music.artist_name ? (music.album_name ? `${music.artist_name} • ${music.album_name}` : music.artist_name) : 'Spotify Track'}
+                    </div>
+                  </div>
                 </div>
+
                 <a
                   href={`https://open.spotify.com/track/${music.spotify_uri.replace('spotify:track:', '')}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-colors"
+                  className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-colors shrink-0"
                   title="Open in Spotify"
                 >
                   <ExternalLink className="h-4 w-4" />
@@ -175,7 +193,7 @@ export const Dashboard: React.FC = () => {
             ) : (
               <div className="space-y-2.5">
                 {recentLogs.map((log) => {
-                  const isGranted = log.result === 'granted';
+                  const isGranted = log.result === 'success' || log.result === 'granted';
                   return (
                     <div
                       key={log.id}

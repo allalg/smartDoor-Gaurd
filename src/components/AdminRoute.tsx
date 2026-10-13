@@ -4,7 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { ShieldX, Loader2 } from 'lucide-react';
 
 export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, isAdmin, loading, isConfigured } = useAuth();
+  const { user, isAdmin, isApproved, isEnabled, loading, isConfigured } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -21,8 +21,8 @@ export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // If user is logged in but does not hold the admin role
-  if (isConfigured && user && !isAdmin) {
+  // If user is logged in but does not hold the admin role or is not approved
+  if (isConfigured && user && (!isAdmin || !isApproved || !isEnabled)) {
     return (
       <div className="min-h-screen bg-[#090d16] flex flex-col items-center justify-center p-6 text-center">
         <div className="max-w-md p-8 rounded-2xl bg-slate-900 border border-amber-500/30 text-slate-200">

@@ -1,16 +1,22 @@
 export type UserRole = 'user' | 'admin';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Profile {
   id: string; // references auth.users.id
   display_name: string | null;
   role: UserRole;
   is_enabled: boolean;
+  approval_status: ApprovalStatus;
   created_at: string;
 }
 
 export interface UserMusic {
   user_id: string; // references auth.users.id
   spotify_uri: string | null;
+  track_title?: string | null;
+  artist_name?: string | null;
+  album_name?: string | null;
+  artwork_url?: string | null;
   updated_at: string;
 }
 
@@ -24,7 +30,7 @@ export interface AuthSession {
   created_at: string;
 }
 
-export type EntryResult = 'granted' | 'denied' | 'pending' | 'timeout';
+export type EntryResult = 'success' | 'failure' | 'granted' | 'denied' | 'pending' | 'timeout';
 
 export interface EntryLog {
   id: string;

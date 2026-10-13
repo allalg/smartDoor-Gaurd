@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { Shield, Lock, Mail, User, ArrowRight, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import { Shield, Lock, Mail, User, ArrowRight, AlertCircle, CheckCircle2, Clock, Loader2 } from 'lucide-react';
 
 export const Signup: React.FC = () => {
-  const { signUp, isConfigured } = useAuth();
+  const { signUp, signOut, isConfigured } = useAuth();
   const navigate = useNavigate();
 
   const [displayName, setDisplayName] = useState('');
@@ -14,6 +14,7 @@ export const Signup: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmationNotice, setConfirmationNotice] = useState(false);
+  const [pendingApprovalNotice, setPendingApprovalNotice] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +39,8 @@ export const Signup: React.FC = () => {
       } else if (result.unconfirmed) {
         setConfirmationNotice(true);
       } else {
-        navigate('/dashboard');
+        await signOut();
+        setPendingApprovalNotice(true);
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
@@ -59,14 +61,30 @@ export const Signup: React.FC = () => {
         </div>
 
         <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-6 sm:p-8 shadow-xl backdrop-blur-sm">
-          {confirmationNotice ? (
+          {pendingApprovalNotice ? (
+            <div className="text-center py-4 space-y-4">
+              <div className="h-12 w-12 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+                <Clock className="h-6 w-6" />
+              </div>
+              <h2 className="text-lg font-semibold text-white">Registration Submitted</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Your account has been registered and is <strong className="text-amber-400 font-medium">awaiting administrator approval</strong>. You will be able to log in and use door access once an authorized administrator approves your registration.
+              </p>
+              <Link
+                to="/login"
+                className="inline-block w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-sm transition-colors border border-slate-700 mt-2"
+              >
+                Proceed to Sign In
+              </Link>
+            </div>
+          ) : confirmationNotice ? (
             <div className="text-center py-4 space-y-4">
               <div className="h-12 w-12 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
                 <CheckCircle2 className="h-6 w-6" />
               </div>
               <h2 className="text-lg font-semibold text-white">Verification Email Sent</h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                We have sent an authentication link to <strong className="text-slate-200">{email}</strong>. Please check your inbox and verify your email to activate door privileges.
+                We have sent an authentication link to <strong className="text-slate-200">{email}</strong>. Please check your inbox and verify your email. After verification, your account will await administrator approval.
               </p>
               <Link
                 to="/login"

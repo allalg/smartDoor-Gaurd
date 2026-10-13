@@ -4,7 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { Shield, Lock, Mail, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 
 export const Login: React.FC = () => {
-  const { signIn, isConfigured } = useAuth();
+  const { signIn, signOut, isConfigured } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -24,9 +24,35 @@ export const Login: React.FC = () => {
       const result = await signIn(email, password);
       if (!result.success) {
         setError(result.error || 'Failed to authenticate');
-      } else {
-        navigate(from, { replace: true });
+        return;
       }
+
+      const userProfile = result.profile;
+      if (!userProfile) {
+        await signOut();
+        setError('Unable to verify account profile. Access blocked by zero-trust security policy.');
+        return;
+      }
+
+      if (userProfile.approval_status === 'pending') {
+        await signOut();
+        setError('Your account is awaiting administrator approval.');
+        return;
+      }
+
+      if (userProfile.approval_status === 'rejected') {
+        await signOut();
+        setError('Your account registration was not approved.');
+        return;
+      }
+
+      if (!userProfile.is_enabled) {
+        await signOut();
+        setError('Your account has been suspended by an administrator.');
+        return;
+      }
+
+      navigate(from, { replace: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
     } finally {

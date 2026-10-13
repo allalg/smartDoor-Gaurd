@@ -9,6 +9,25 @@ export interface SpotifyTrackInfo {
   error?: string;
 }
 
+export interface SpotifySearchResultTrack {
+  id: string;
+  uri: string;
+  title: string;
+  artist_name: string;
+  album_name: string;
+  artwork_url: string | null;
+  duration_ms?: number;
+  preview_url?: string | null;
+  external_url?: string | null;
+}
+
+export interface TrackMetadata {
+  track_title?: string | null;
+  artist_name?: string | null;
+  album_name?: string | null;
+  artwork_url?: string | null;
+}
+
 /**
  * Validates and normalizes user input into a canonical Spotify track URI and URL.
  * Supports:
@@ -55,18 +74,120 @@ export function parseSpotifyInput(input: string): SpotifyTrackInfo {
   };
 }
 
+/**
+ * Searches Spotify's catalog via the backend Edge Function `spotify-search`.
+ * Never exposes Spotify Client Secret or refresh token in the browser.
+ */
+export async function searchSpotifyTracks(
+  query: string
+): Promise<{ tracks: SpotifySearchResultTrack[]; error: string | null }> {
+  if (!query || query.trim().length === 0) {
+    return { tracks: [], error: null };
+  }
+
+  if (!isSupabaseConfigured) {
+    return { tracks: [], error: 'Supabase credentials are not configured.' };
+  }
+
+  try {
+    const { data, error } = await supabase.functions.invoke('spotify-search', {
+      body: { q: query.trim() },
+    });
+
+    if (error) {
+      return { tracks: [], error: error.message || 'Spotify search request failed' };
+    }
+
+    if (data?.error) {
+      return { tracks: [], error: data.error };
+    }
+
+    return { tracks: data?.tracks || [], error: null };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unable to connect to Spotify search';
+    return { tracks: [], error: msg };
+  }
+}
+
+/**
+ * Fetches detailed metadata for a single Spotify track by URI or ID from backend Edge Function.
+ */
+export async function fetchSpotifyTrackDetails(
+  uriOrId: string
+): Promise<{ track: SpotifySearchResultTrack | null; error: string | null }> {
+  const trimmed = uriOrId.trim();
+  if (!trimmed) {
+    return { track: null, error: 'Track identifier cannot be empty' };
+  }
+
+  if (!isSupabaseConfigured) {
+    return { track: null, error: 'Supabase credentials are not configured.' };
+  }
+
+  try {
+    const { data, error } = await supabase.functions.invoke('spotify-search', {
+      body: { uri: trimmed },
+    });
+
+    if (error) {
+      return { track: null, error: error.message || 'Spotify track lookup failed' };
+    }
+
+    if (data?.error) {
+      return { track: null, error: data.error };
+    }
+
+    if (data?.track) {
+      return { track: data.track, error: null };
+    }
+
+    return { track: null, error: 'Track not found' };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unable to fetch track details';
+    return { track: null, error: msg };
+  }
+}
+
+/**
+ * Saves a user's preferred entry song together with display metadata.
+ * Automatically fetches metadata if omitted and a track URI is provided.
+ */
 export async function saveUserMusicPreference(
   userId: string,
-  spotifyUri: string | null
+  spotifyUri: string | null,
+  metadata?: TrackMetadata
 ): Promise<{ success: boolean; data: UserMusic | null; error: string | null }> {
   if (!isSupabaseConfigured) {
     return { success: false, data: null, error: 'Supabase credentials are not configured.' };
   }
 
   try {
+    let resolvedMetadata = metadata;
+
+    // Automatically hydrate metadata from Spotify API if not supplied
+    if (spotifyUri && (!resolvedMetadata || !resolvedMetadata.track_title)) {
+      try {
+        const { track } = await fetchSpotifyTrackDetails(spotifyUri);
+        if (track) {
+          resolvedMetadata = {
+            track_title: track.title,
+            artist_name: track.artist_name,
+            album_name: track.album_name,
+            artwork_url: track.artwork_url,
+          };
+        }
+      } catch {
+        // Fall back gracefully to saving without metadata if Spotify is unreachable
+      }
+    }
+
     const payload = {
       user_id: userId,
       spotify_uri: spotifyUri,
+      track_title: resolvedMetadata?.track_title ?? null,
+      artist_name: resolvedMetadata?.artist_name ?? null,
+      album_name: resolvedMetadata?.album_name ?? null,
+      artwork_url: resolvedMetadata?.artwork_url ?? null,
       updated_at: new Date().toISOString(),
     };
 
@@ -87,8 +208,16 @@ export async function saveUserMusicPreference(
   }
 }
 
+/**
+ * Clears the user's preferred entry song and metadata.
+ */
 export async function clearUserMusicPreference(
   userId: string
 ): Promise<{ success: boolean; error: string | null }> {
-  return saveUserMusicPreference(userId, null);
+  return saveUserMusicPreference(userId, null, {
+    track_title: null,
+    artist_name: null,
+    album_name: null,
+    artwork_url: null,
+  });
 }

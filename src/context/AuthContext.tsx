@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-import type { Profile, UserMusic, UserRole } from '@/types/database';
+import type { Profile, UserMusic, UserRole, ApprovalStatus } from '@/types/database';
 import { fetchUserProfile, fetchUserMusicPreference } from '@/services/auth';
 
 interface AuthContextType {
@@ -12,10 +12,14 @@ interface AuthContextType {
   role: UserRole;
   isAdmin: boolean;
   isEnabled: boolean;
+  approvalStatus: ApprovalStatus;
+  isApproved: boolean;
+  isPendingApproval: boolean;
+  isRejected: boolean;
   loading: boolean;
   isConfigured: boolean;
   error: string | null;
-  signIn: (email: string, password: string) => Promise<{ success: boolean; error: string | null }>;
+  signIn: (email: string, password: string) => Promise<{ success: boolean; error: string | null; profile?: Profile | null }>;
   signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error: string | null; unconfirmed?: boolean }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -32,7 +36,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadUserData = async (currentUser: User) => {
+  const loadUserData = async (currentUser: User): Promise<Profile | null> => {
     try {
       const [fetchedProfile, fetchedMusic] = await Promise.all([
         fetchUserProfile(currentUser.id),
@@ -40,8 +44,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ]);
       setProfile(fetchedProfile);
       setMusic(fetchedMusic);
+      return fetchedProfile;
     } catch (err) {
       console.error('Failed to load user profile or music preferences:', err);
+      return null;
     }
   };
 
@@ -110,11 +116,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: authError.message };
       }
 
+      let userProfile: Profile | null = null;
       if (data.user) {
-        await loadUserData(data.user);
+        userProfile = await loadUserData(data.user);
       }
 
-      return { success: true, error: null };
+      return { success: true, error: null, profile: userProfile };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Login failed';
       return { success: false, error: msg };
@@ -163,7 +170,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const role: UserRole = profile?.role ?? 'user';
   const isAdmin = role === 'admin';
-  const isEnabled = profile?.is_enabled ?? true;
+  const isEnabled = profile?.is_enabled ?? false;
+  const approvalStatus: ApprovalStatus = profile?.approval_status ?? (profile?.is_enabled ? 'approved' : 'pending');
+  const isApproved = approvalStatus === 'approved' && isEnabled;
+  const isPendingApproval = approvalStatus === 'pending';
+  const isRejected = approvalStatus === 'rejected';
 
   const value = useMemo(
     () => ({
@@ -174,6 +185,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       role,
       isAdmin,
       isEnabled,
+      approvalStatus,
+      isApproved,
+      isPendingApproval,
+      isRejected,
       loading,
       isConfigured: isSupabaseConfigured,
       error,
@@ -183,7 +198,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       refreshProfile,
       refreshMusic,
     }),
-    [user, session, profile, music, role, isAdmin, isEnabled, loading, error]
+    [user, session, profile, music, role, isAdmin, isEnabled, approvalStatus, isApproved, isPendingApproval, isRejected, loading, error]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

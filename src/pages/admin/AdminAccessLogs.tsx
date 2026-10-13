@@ -43,7 +43,8 @@ export const AdminAccessLogs: React.FC = () => {
   }, []);
 
   const filteredLogs = logs.filter((log) => {
-    if (filter !== 'all' && log.result !== filter) return false;
+    if (filter === 'granted' && log.result !== 'granted' && log.result !== 'success') return false;
+    if (filter === 'denied' && log.result !== 'denied' && log.result !== 'failure') return false;
     if (!search) return true;
 
     const q = search.toLowerCase();
@@ -148,7 +149,7 @@ export const AdminAccessLogs: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-mono text-slate-300">
                 {filteredLogs.map((log) => {
-                  const isGranted = log.result === 'granted';
+                  const isGranted = log.result === 'granted' || log.result === 'success';
                   return (
                     <tr key={log.id} className="hover:bg-slate-800/30 transition-colors">
                       <td className="py-3.5 px-4 sm:px-6">

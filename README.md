@@ -32,8 +32,8 @@ SmartDoor Guard is a production-grade, zero-trust web application for an **IoT-B
               |                                                                            | (Prevents replay attacks)
               |                                                                            | (Logs to entry_logs)
               |                                                                            |
-              |                                                                            |--[Optional IFTTT Webhook]--> Spotify
-              |                                                                            |   (Triggers user_music song)
+              |                                                                            |--[Direct Spotify Web API]--> Spotify Connect Device
+              |                                                                            |   (Plays preferred user_music song)
               |                                                                            |
               |                                                                            |--[If Replay / Failed]------> Intrusion Alert
               |                                                                            |   (Logs to intrusion_alerts)
@@ -91,10 +91,17 @@ smart-entry-system/
 │   └── main.tsx                      # Application root mount
 ├── supabase/
 │   ├── functions/
+│   │   ├── _shared/                  # Shared utilities (Spotify Web API client, device targeting)
 │   │   ├── issue-auth-session/       # Edge function: issues single-use 60s OTP
-│   │   ├── verify-door-auth/         # Edge function: ESP32 Wi-Fi validation, IFTTT music trigger
-│   │   └── admin-actions/            # Edge function: server-authorized role changes
-│   └── schema.sql                    # Existing schema reference and RLS policies
+│   │   ├── verify-door-auth/         # Edge function: ESP32 Wi-Fi validation, direct Spotify playback
+│   │   ├── admin-actions/            # Edge function: server-authorized role changes
+│   │   ├── spotify-search/           # Edge function: catalog search for authenticated users
+│   │   ├── spotify-auth-url/         # Edge function: OAuth authorization URL & state token
+│   │   ├── spotify-callback/         # Edge function: OAuth code exchange & refresh token store
+│   │   ├── spotify-test-devices/     # Edge function: diagnostic endpoint for Connect devices
+│   │   └── spotify-test-playback/    # Edge function: diagnostic endpoint for direct playback
+│   ├── migrations/                   # Database migrations (PostgreSQL DDL)
+│   └── schema.sql                    # Complete schema reference and RLS policies
 ├── .env.example                      # Template for frontend environment variables
 ├── package.json
 └── vite.config.ts
@@ -163,11 +170,19 @@ supabase link --project-ref your-project-ref
 supabase functions deploy issue-auth-session
 supabase functions deploy verify-door-auth
 supabase functions deploy admin-actions
+supabase functions deploy spotify-search
 
 # 4. Set required backend secrets in Supabase
 supabase secrets set DOOR_DEVICE_SECRET="your-esp32-hardware-secret-key"
-supabase secrets set IFTTT_WEBHOOK_KEY="your-ifttt-maker-webhook-key"
-supabase secrets set IFTTT_EVENT_NAME="door_entry_spotify"
+supabase secrets set OTP_HMAC_SECRET="your-secure-64-char-hmac-secret-key"
+
+# 5. Spotify Web API backend secrets (Already configured in Spotify Developer Dashboard)
+supabase secrets set SPOTIFY_CLIENT_ID="your-spotify-client-id"
+supabase secrets set SPOTIFY_CLIENT_SECRET="your-spotify-client-secret"
+supabase secrets set SPOTIFY_REDIRECT_URI="https://<project-ref>.supabase.co/functions/v1/spotify-callback"
+supabase secrets set SPOTIFY_SETUP_SECRET="your-high-entropy-setup-secret"
+# Optional: defaults to "Web Player (Chrome)" or first active Connect device
+supabase secrets set SPOTIFY_DEVICE_NAME="Web Player (Chrome)"
 ```
 
 ---
@@ -202,31 +217,83 @@ When configuring the ESP32 microcontroller firmware (C++ / Arduino IDE or ESP-ID
    - If response `decision == "granted"`:
      - Pull GPIO pin HIGH for 5 seconds to activate the solenoid door lock relay.
      - Display on LCD: `Welcome <display_name>!`.
+     - Direct Spotify playback starts automatically in backend on the configured Spotify device.
    - If response `decision == "denied"`:
      - Keep lock engaged.
      - Sound buzzer on GPIO pin for 2 seconds.
      - Display on LCD: `Access Denied!`.
+     - Music is never triggered.
 
 ---
 
-## 7. Spotify Integration (IFTTT)
+## 7. Spotify Web API Direct Integration (No IFTTT Required)
 
-1. Create a free account on [IFTTT.com](https://ifttt.com).
-2. Create a new Applet:
-   - **If This**: Webhooks -> "Receive a web request" -> Event Name: `door_entry_spotify`.
-   - **Then That**: Spotify -> "Start playback" or "Play a track" -> Track URI: `{{Value2}}`.
-3. Retrieve your IFTTT Webhook key from `https://ifttt.com/maker_webhooks/settings`.
-4. Add the key to Supabase Secrets: `supabase secrets set IFTTT_WEBHOOK_KEY="your_key"`.
+SmartDoor Guard integrates directly with the **Spotify Web API**:
+
+1. **Shared Playback Account**:
+   - A dedicated shared Spotify account (or home speaker account) is linked via `spotify-auth-url` and `spotify-callback`.
+   - Refresh tokens are securely stored in the private `spotify_shared_account` table with strict Row Level Security (RLS restricted solely to `service_role`).
+   - Access tokens are automatically refreshed and rotated on demand.
+
+2. **Song Search & Selection**:
+   - Authenticated residents search the Spotify catalog directly in the UI via the `spotify-search` Edge Function.
+   - Client applications never receive or store the Spotify Client Secret.
+   - Selected tracks are persisted with canonical URI (`spotify:track:...`) and rich metadata (track name, artist, album, artwork URL) in `user_music`.
+
+3. **Direct Playback on Door Unlock**:
+   - When `verify-door-auth` verifies entry, it calls `PUT https://api.spotify.com/v1/me/player/play` targeting the active Spotify Connect device (such as `Web Player (Chrome)` or an audio receiver).
+   - Playback operates in a completely fail-safe manner: Spotify network errors, timeouts, or absent playback devices will **never** block or delay physical door entry.
 
 ---
 
-## 8. End-to-End Testing Checklist
+## 8. Mandatory Administrator Approval System
 
-- [x] **Account Signup & Verification**: Create account at `/signup`, check automatic profile creation in `profiles`.
-- [x] **Role Authorization**: Verify `/admin` routes redirect ordinary users to `/dashboard` with unauthorized message.
-- [x] **Spotify Preference**: Enter `spotify:track:...` or URL at `/profile`, verify persistence in `user_music` table.
+SmartDoor Guard enforces mandatory administrator approval for all resident registrations:
+1. **Zero-Trust Signup Defaults**:
+   - Newly registered users strictly initialize with `role = 'user'`, `is_enabled = false`, and `approval_status = 'pending'`.
+   - Protected triggers (`protect_profile_columns`) prohibit client-side modification of `role`, `is_enabled`, or `approval_status`.
+2. **Backend Door-Auth Gating**:
+   - `issue-auth-session` and `verify-door-auth` verify both `is_enabled = true` and `approval_status = 'approved'`.
+   - Pending or rejected users cannot obtain single-use door-auth OTPs or trigger door entry.
+3. **Administration Console Review Queue**:
+   - The `/admin` dashboard displays a **Pending Signups** alert card and direct review queue.
+   - Administrators approve or reject users with atomic database synchronization via `admin_update_user`:
+     - **Approve**: sets `approval_status = 'approved'` and `is_enabled = true`.
+     - **Reject**: sets `approval_status = 'rejected'` and `is_enabled = false`.
+   - Self-modification and demotion of the last active administrator are strictly prevented.
+
+---
+
+## 9. Automated Testing & Verification
+
+SmartDoor Guard includes an automated security and regression test suite:
+
+```bash
+# Run security and Spotify regression tests (Node test runner)
+npm test
+
+# Run PostgreSQL staging integration tests
+npm run test:staging
+```
+
+Test coverage includes:
+- **HMAC-SHA256 Token Validation & Replay Prevention**: Atomic consumption and single-use 60s TTL.
+- **Mandatory Admin Approval**: Default pending state, client trigger protection, and approval/rejection lifecycle.
+- **Zero-Trust Access Control**: Suspended, pending, or rejected accounts blocked from door-auth sessions.
+- **Spotify Web API Resilience**: Fail-safe playback isolation and Spotify URI parsing.
+- **PostgreSQL Database Constraints**: Result check constraint validation (`result IN ('success', 'failure')`).
+
+---
+
+## 10. End-to-End Testing Checklist
+
+- [x] **Account Signup & Verification**: Create account at `/signup`, verify default `pending` status and approval notification.
+- [x] **Admin Approval Queue**: Approve/reject pending resident in `/admin/users`, verifying atomic `is_enabled` sync.
+- [x] **Role Authorization**: Verify `/admin` routes redirect unapproved or ordinary users with unauthorized message.
+- [x] **Spotify Preference**: Select track from catalog picker at `/profile`, verify persistence in `user_music` table.
 - [x] **Single-Use OTP Session**: Request auth session via `/issue-auth-session`, verify 60-second TTL countdown in UI.
 - [x] **Replay Protection**: Verify that consuming the same OTP twice fails atomically and triggers an intrusion alert.
 - [x] **Web Bluetooth Handshake**: Connect via Bluetooth on Android Chrome, send auth payload to ESP32.
 - [x] **Realtime Admin Alerts**: Acknowledge alerts in `/admin/alerts`, verify real-time status update.
 - [x] **Mobile Responsiveness**: Test touch controls and compact bottom bar on Android viewports.
+

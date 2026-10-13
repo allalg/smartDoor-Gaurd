@@ -91,16 +91,13 @@ class BluetoothService {
     try {
       this.notifyState('requesting_permission');
 
-      // Filter by custom service UUID or name prefix
-      const filters: BluetoothLEScanFilter[] = [];
-      if (this.config.namePrefix) {
-        filters.push({ namePrefix: this.config.namePrefix });
-      }
-
       const options: RequestDeviceOptions = {
-        filters: filters.length > 0 ? filters : undefined,
-        acceptAllDevices: filters.length === 0,
-        optionalServices: [this.config.serviceUuid],
+        filters: [
+          { services: [this.config.serviceUuid] },
+        ],
+        optionalServices: [
+          this.config.serviceUuid,
+        ],
       };
 
       this.device = await navigator.bluetooth.requestDevice(options);

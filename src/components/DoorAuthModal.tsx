@@ -8,15 +8,12 @@ import {
   Shield,
   KeyRound,
   Bluetooth,
-  Wifi,
   Music,
   CheckCircle2,
   XCircle,
   AlertTriangle,
   Loader2,
   X,
-  Volume2,
-  Radio,
   Timer,
   Lock,
   Unlock,
@@ -311,10 +308,10 @@ export const DoorAuthModal: React.FC<DoorAuthModalProps> = ({
           <div className="mb-4 p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-slate-400">
               <Music className="h-3.5 w-3.5 text-emerald-400" />
-              <span>Welcome Track Configured:</span>
+              <span>Welcome Track:</span>
             </div>
-            <span className="font-mono text-emerald-400 text-[11px] truncate max-w-[180px]">
-              {music.spotify_uri}
+            <span className="text-emerald-400 text-xs truncate max-w-[200px] font-medium" title={music.track_title || 'Selected Spotify track'}>
+              {music.track_title || 'Selected Spotify track'}
             </span>
           </div>
         )}

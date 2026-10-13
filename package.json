@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "node --test tests/security.test.mjs tests/spotify.test.mjs",
+    "test:staging": "node --test tests/postgres_staging.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },
@@ -22,13 +24,15 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@types/web-bluetooth": "^0.0.21",
     "@vitejs/plugin-react": "^6.1.1",
     "oxlint": "^1.81.0",
+    "pg": "^8.23.1",
     "supabase": "^2.120.0",
     "typescript": "~6.0.2",
-    "vite": "^8.3.0"
+    "vite": "^8.3.4"
   }
 }

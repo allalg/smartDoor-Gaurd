@@ -3,6 +3,7 @@ import type { Profile, IntrusionAlert, EntryLog } from '@/types/database';
 
 export interface AdminMetrics {
   totalUsers: number;
+  pendingApprovals: number;
   successfulEntries: number;
   failedEntries: number;
   unacknowledgedAlerts: number;
@@ -12,6 +13,7 @@ export interface AdminMetrics {
 export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; error: string | null }> {
   const defaultMetrics: AdminMetrics = {
     totalUsers: 0,
+    pendingApprovals: 0,
     successfulEntries: 0,
     failedEntries: 0,
     unacknowledgedAlerts: 0,
@@ -34,7 +36,7 @@ export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; erro
     const { count: successCount, error: successErr } = await supabase
       .from('entry_logs')
       .select('*', { count: 'exact', head: true })
-      .eq('result', 'granted');
+      .in('result', ['success', 'granted']);
 
     if (successErr) console.warn('Success entries count error:', successErr.message);
 
@@ -42,7 +44,7 @@ export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; erro
     const { count: failedCount, error: failErr } = await supabase
       .from('entry_logs')
       .select('*', { count: 'exact', head: true })
-      .eq('result', 'denied');
+      .in('result', ['failure', 'denied']);
 
     if (failErr) console.warn('Failed entries count error:', failErr.message);
 
@@ -63,9 +65,31 @@ export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; erro
 
     if (recentErr) console.warn('Recent events error:', recentErr.message);
 
+    // 1b. Pending approvals count
+    let pendingCount = 0;
+    const { count: pCount, error: pendingErr } = await supabase
+      .from('profiles')
+      .select('*', { count: 'exact', head: true })
+      .eq('approval_status', 'pending');
+
+    if (pendingErr) {
+      if (pendingErr.code === '42703' || pendingErr.message?.toLowerCase().includes('approval_status')) {
+        const { count: disabledCount } = await supabase
+          .from('profiles')
+          .select('*', { count: 'exact', head: true })
+          .eq('is_enabled', false);
+        pendingCount = disabledCount ?? 0;
+      } else {
+        console.warn('Count pending approvals error:', pendingErr.message);
+      }
+    } else {
+      pendingCount = pCount ?? 0;
+    }
+
     return {
       metrics: {
         totalUsers: usersCount ?? 0,
+        pendingApprovals: pendingCount,
         successfulEntries: successCount ?? 0,
         failedEntries: failedCount ?? 0,
         unacknowledgedAlerts: alertsCount ?? 0,
@@ -87,11 +111,32 @@ export async function fetchAllUsers(): Promise<{ users: Profile[]; error: string
   try {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, display_name, role, is_enabled, created_at')
+      .select('id, display_name, role, is_enabled, approval_status, created_at')
       .order('created_at', { ascending: false });
 
-    if (error) return { users: [], error: error.message };
-    return { users: (data as Profile[]) || [], error: null };
+    if (error) {
+      if (error.code === '42703' || error.message?.toLowerCase().includes('approval_status')) {
+        const fallback = await supabase
+          .from('profiles')
+          .select('id, display_name, role, is_enabled, created_at')
+          .order('created_at', { ascending: false });
+
+        if (!fallback.error && fallback.data) {
+          const adaptedUsers = (fallback.data as Profile[]).map((u) => ({
+            ...u,
+            approval_status: u.approval_status || (u.is_enabled ? 'approved' : 'pending'),
+          }));
+          return { users: adaptedUsers, error: null };
+        }
+      }
+      return { users: [], error: error.message };
+    }
+
+    const sanitizedUsers = ((data as Profile[]) || []).map((u) => ({
+      ...u,
+      approval_status: u.approval_status || (u.is_enabled ? 'approved' : 'pending'),
+    }));
+    return { users: sanitizedUsers, error: null };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch user list';
     return { users: [], error: msg };
@@ -105,12 +150,20 @@ export async function toggleUserStatus(
   if (!isSupabaseConfigured) return { success: false, error: 'Supabase not configured' };
 
   try {
-    const { error } = await supabase
-      .from('profiles')
-      .update({ is_enabled: isEnabled })
-      .eq('id', userId);
+    const { data, error } = await supabase.functions.invoke<{ success: boolean; message?: string; error?: string }>(
+      'admin-actions',
+      {
+        body: {
+          action: 'toggle_user_status',
+          targetUserId: userId,
+          newStatus: isEnabled,
+        },
+      }
+    );
 
-    if (error) return { success: false, error: error.message };
+    if (error || !data?.success) {
+      return { success: false, error: data?.error || error?.message || 'Failed to update user status' };
+    }
     return { success: true, error: null };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to update user status';
@@ -125,15 +178,51 @@ export async function updateUserRole(
   if (!isSupabaseConfigured) return { success: false, error: 'Supabase not configured' };
 
   try {
-    const { error } = await supabase
-      .from('profiles')
-      .update({ role })
-      .eq('id', userId);
+    const { data, error } = await supabase.functions.invoke<{ success: boolean; message?: string; error?: string }>(
+      'admin-actions',
+      {
+        body: {
+          action: 'update_user_role',
+          targetUserId: userId,
+          newRole: role,
+        },
+      }
+    );
 
-    if (error) return { success: false, error: error.message };
+    if (error || !data?.success) {
+      return { success: false, error: data?.error || error?.message || 'Failed to change role' };
+    }
     return { success: true, error: null };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to change role';
+    return { success: false, error: msg };
+  }
+}
+
+export async function setUserApproval(
+  userId: string,
+  approvalStatus: 'approved' | 'rejected'
+): Promise<{ success: boolean; error: string | null }> {
+  if (!isSupabaseConfigured) return { success: false, error: 'Supabase not configured' };
+
+  try {
+    const { data, error } = await supabase.functions.invoke<{ success: boolean; message?: string; error?: string }>(
+      'admin-actions',
+      {
+        body: {
+          action: 'set_user_approval',
+          targetUserId: userId,
+          approvalStatus,
+        },
+      }
+    );
+
+    if (error || !data?.success) {
+      return { success: false, error: data?.error || error?.message || 'Failed to update approval status' };
+    }
+    return { success: true, error: null };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to update approval status';
     return { success: false, error: msg };
   }
 }
@@ -176,15 +265,19 @@ export async function acknowledgeAlert(
   if (!isSupabaseConfigured) return { success: false, error: 'Supabase not configured' };
 
   try {
-    const { error } = await supabase
-      .from('intrusion_alerts')
-      .update({
-        acknowledged_at: new Date().toISOString(),
-        notification_status: 'acknowledged',
-      })
-      .eq('id', alertId);
+    const { data, error } = await supabase.functions.invoke<{ success: boolean; message?: string; error?: string }>(
+      'admin-actions',
+      {
+        body: {
+          action: 'acknowledge_alert',
+          alertId,
+        },
+      }
+    );
 
-    if (error) return { success: false, error: error.message };
+    if (error || !data?.success) {
+      return { success: false, error: data?.error || error?.message || 'Failed to acknowledge alert' };
+    }
     return { success: true, error: null };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to acknowledge alert';

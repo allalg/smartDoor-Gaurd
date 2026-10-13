@@ -8,82 +8,133 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+/**
+ * Computes an HMAC-SHA256 hex digest for a given message using a server secret.
+ */
+async function computeOtpHmac(secret: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method !== "POST") {
+    return new Response(
+      JSON.stringify({ success: false, error: "Method not allowed" }),
+      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+    const otpHmacSecret = Deno.env.get("OTP_HMAC_SECRET");
 
-    if (!supabaseUrl || !supabaseServiceKey) {
+    // Fail closed if critical environment variables are missing
+    if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
+      console.error("[issue-auth-session] Server configuration missing Supabase credentials");
       return new Response(
-        JSON.stringify({ success: false, error: "Server configuration missing" }),
+        JSON.stringify({ success: false, error: "Internal server error" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!otpHmacSecret || otpHmacSecret.trim().length === 0) {
+      console.error("[issue-auth-session] Server configuration missing OTP_HMAC_SECRET");
+      return new Response(
+        JSON.stringify({ success: false, error: "Internal server error" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     // 1. Authenticate caller from Authorization Bearer token (Zero-Trust)
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return new Response(
-        JSON.stringify({ success: false, error: "Missing authorization token" }),
+        JSON.stringify({ success: false, error: "Missing or invalid authorization header" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const token = authHeader.replace("Bearer ", "");
+    const token = authHeader.replace("Bearer ", "").trim();
     const userClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: `Bearer ${token}` } },
     });
 
     const { data: { user }, error: userError } = await userClient.auth.getUser();
     if (userError || !user) {
+      console.warn("[issue-auth-session] User authentication failed:", userError?.message);
       return new Response(
         JSON.stringify({ success: false, error: "Invalid or expired user session" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Use admin client with service role for secure database queries
+    // Service-role admin client for database validation and session creation
     const adminClient = createClient(supabaseUrl, supabaseServiceKey);
 
-    // 2. Verify user account status and profile
+    // 2. Verify caller profile and account status — fail closed on any DB error
     const { data: profile, error: profileErr } = await adminClient
       .from("profiles")
-      .select("id, display_name, role, is_enabled")
+      .select("id, display_name, role, is_enabled, approval_status")
       .eq("id", user.id)
       .single();
 
-    if (profileErr || !profile) {
+    if (profileErr) {
+      console.error("[issue-auth-session] Database error reading profile for user", user.id, profileErr.message);
+      return new Response(
+        JSON.stringify({ success: false, error: "Failed to verify account permissions" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!profile) {
+      console.warn("[issue-auth-session] Profile record not found for user", user.id);
       return new Response(
         JSON.stringify({ success: false, error: "User profile record not found" }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    if (!profile.is_enabled) {
+    if (!profile.is_enabled || profile.approval_status !== "approved") {
+      console.warn("[issue-auth-session] Unauthorized access attempt by user", user.id, "status:", profile.approval_status, "enabled:", profile.is_enabled);
+      const errorMsg = profile.approval_status === "pending"
+        ? "Your account is awaiting administrator approval."
+        : profile.approval_status === "rejected"
+        ? "Your account registration was not approved."
+        : "User door access privileges are suspended.";
+
       return new Response(
-        JSON.stringify({ success: false, error: "User door access privileges are suspended" }),
+        JSON.stringify({ success: false, error: errorMsg }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // 3. Generate short-lived single-use OTP (6-digit cryptographically random)
-    const rawOtp = crypto.getRandomValues(new Uint32Array(1))[0] % 900000 + 100000;
-    const otpString = rawOtp.toString();
+    // 3. Generate a cryptographically secure 6-digit OTP (100000 - 999999)
+    const randomBuffer = new Uint32Array(1);
+    crypto.getRandomValues(randomBuffer);
+    const otpValue = 100000 + (randomBuffer[0] % 900000);
+    const otpString = otpValue.toString();
     const requestId = crypto.randomUUID();
 
-    // 4. Hash the OTP with SHA-256 for secure database storage
-    const encoder = new TextEncoder();
-    const data = encoder.encode(otpString + requestId);
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const otpHash = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+    // 4. Calculate HMAC-SHA256 using server-side secret
+    const otpHmacHash = await computeOtpHmac(otpHmacSecret, otpString + requestId);
 
-    // Expiry: 60 seconds from now
+    // 60-second TTL
     const expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
 
     // 5. Store session in auth_sessions table
@@ -91,20 +142,20 @@ serve(async (req: Request) => {
       id: crypto.randomUUID(),
       request_id: requestId,
       user_id: user.id,
-      otp_hash: otpHash,
+      otp_hash: otpHmacHash,
       expires_at: expiresAt,
       consumed_at: null,
     });
 
     if (insertErr) {
-      console.error("Failed to store auth_session:", insertErr);
+      console.error("[issue-auth-session] Database error storing auth_session:", insertErr.message);
       return new Response(
-        JSON.stringify({ success: false, error: "Database error creating session" }),
+        JSON.stringify({ success: false, error: "Failed to initialize door session" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // 6. Return response to client
+    // 6. Return response preserving required frontend contract
     return new Response(
       JSON.stringify({
         success: true,
@@ -116,9 +167,9 @@ serve(async (req: Request) => {
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Internal server error";
+    console.error("[issue-auth-session] Unexpected error:", err);
     return new Response(
-      JSON.stringify({ success: false, error: message }),
+      JSON.stringify({ success: false, error: "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

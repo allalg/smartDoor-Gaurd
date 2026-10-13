@@ -46,6 +46,8 @@ export const AccessHistory: React.FC = () => {
 
   const filteredLogs = logs.filter((log) => {
     if (filter === 'all') return true;
+    if (filter === 'granted') return log.result === 'granted' || log.result === 'success';
+    if (filter === 'denied') return log.result === 'denied' || log.result === 'failure';
     return log.result === filter;
   });
 
@@ -140,7 +142,7 @@ export const AccessHistory: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-mono text-slate-300">
                 {filteredLogs.map((log) => {
-                  const isGranted = log.result === 'granted';
+                  const isGranted = log.result === 'granted' || log.result === 'success';
                   return (
                     <tr key={log.id} className="hover:bg-slate-800/30 transition-colors">
                       <td className="py-3.5 px-4 sm:px-6">

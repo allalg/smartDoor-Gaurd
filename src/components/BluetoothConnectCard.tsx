@@ -12,14 +12,10 @@ import type {
 import {
   Bluetooth,
   BluetoothConnected,
-  BluetoothOff,
   AlertCircle,
-  CheckCircle2,
   Settings,
   RefreshCw,
   Cpu,
-  Radio,
-  ExternalLink,
 } from 'lucide-react';
 
 interface BluetoothConnectCardProps {
