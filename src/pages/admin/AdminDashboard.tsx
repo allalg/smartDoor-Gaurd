@@ -45,15 +45,20 @@ export const AdminDashboard: React.FC = () => {
         fetchAllUsers(),
       ]);
 
+      const pending = usersRes.users
+        ? usersRes.users.filter((u) => u.approval_status === 'pending')
+        : [];
+      setPendingSignups(pending);
+
       if (metricsRes.error) {
         setError(metricsRes.error);
       } else {
-        setMetrics(metricsRes.metrics);
-      }
-
-      if (usersRes.users) {
-        const pending = usersRes.users.filter((u) => u.approval_status === 'pending');
-        setPendingSignups(pending);
+        const syncedMetrics = { ...metricsRes.metrics };
+        if (usersRes.users && usersRes.users.length > 0) {
+          syncedMetrics.totalUsers = Math.max(syncedMetrics.totalUsers, usersRes.users.length);
+          syncedMetrics.pendingApprovals = pending.length;
+        }
+        setMetrics(syncedMetrics);
       }
     } catch {
       setError('Failed to load administration metrics');

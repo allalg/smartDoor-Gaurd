@@ -894,3 +894,91 @@ test('admin-actions & admin_update_user: Authorization, atomic approval, and rej
   assert.equal(db.profiles.get(adminId).is_enabled, true);
 });
 
+test('admin-actions list_users: Active administrator can securely view pending signups and all user profiles', () => {
+  const db = new MockDatabase();
+  const adminId = '11111111-aaaa-bbbb-cccc-111111111111';
+  const residentId = '22222222-aaaa-bbbb-cccc-222222222222';
+  const pendingId = '33333333-aaaa-bbbb-cccc-333333333333';
+
+  db.addProfile(adminId, 'Super Admin', 'admin', true, 'approved');
+  db.addProfile(residentId, 'Active User', 'user', true, 'approved');
+  db.handleNewUser(pendingId, 'Waiting User');
+
+  function simulateAdminActionsListUsers(callerProfile) {
+    if (!callerProfile) {
+      return { status: 401, error: 'Invalid or expired credentials' };
+    }
+    if (!callerProfile.is_enabled || callerProfile.approval_status !== 'approved') {
+      return { status: 403, error: 'Account access is suspended or awaiting approval' };
+    }
+    if (callerProfile.role !== 'admin') {
+      return { status: 403, error: 'Forbidden: Administrator role required' };
+    }
+
+    // Return all users via service_role
+    return {
+      status: 200,
+      success: true,
+      users: Array.from(db.profiles.values()),
+    };
+  }
+
+  // 1. Active admin fetches user directory
+  const adminRes = simulateAdminActionsListUsers(db.profiles.get(adminId));
+  assert.equal(adminRes.status, 200);
+  assert.equal(adminRes.success, true);
+  assert.equal(adminRes.users.length, 3);
+
+  // Verify pending signup is visible to the admin
+  const pendingSignups = adminRes.users.filter((u) => u.approval_status === 'pending');
+  assert.equal(pendingSignups.length, 1);
+  assert.equal(pendingSignups[0].id, pendingId);
+
+  // 2. Ordinary resident cannot access user directory
+  const residentRes = simulateAdminActionsListUsers(db.profiles.get(residentId));
+  assert.equal(residentRes.status, 403);
+  assert.equal(residentRes.error, 'Forbidden: Administrator role required');
+
+  // 3. Pending resident cannot access user directory
+  const pendingRes = simulateAdminActionsListUsers(db.profiles.get(pendingId));
+  assert.equal(pendingRes.status, 403);
+  assert.equal(pendingRes.error, 'Account access is suspended or awaiting approval');
+});
+
+test('RLS policy simulation: Ordinary residents can only select own profile while admins view all', () => {
+  const db = new MockDatabase();
+  const adminId = '11111111-aaaa-bbbb-cccc-111111111111';
+  const residentId = '22222222-aaaa-bbbb-cccc-222222222222';
+  const pendingId = '33333333-aaaa-bbbb-cccc-333333333333';
+
+  db.addProfile(adminId, 'Super Admin', 'admin', true, 'approved');
+  db.addProfile(residentId, 'Active User', 'user', true, 'approved');
+  db.handleNewUser(pendingId, 'Waiting User');
+
+  function simulateRlsProfilesSelect(callerId) {
+    const caller = db.profiles.get(callerId);
+    const isAdmin = caller && caller.role === 'admin' && caller.is_enabled && caller.approval_status === 'approved';
+
+    return Array.from(db.profiles.values()).filter((row) => {
+      // USING (auth.uid() = id OR public.is_admin())
+      return row.id === callerId || isAdmin;
+    });
+  }
+
+  // 1. Ordinary user can only view their own profile
+  const userVisible = simulateRlsProfilesSelect(residentId);
+  assert.equal(userVisible.length, 1);
+  assert.equal(userVisible[0].id, residentId);
+
+  // 2. Pending user can only view their own pending profile
+  const pendingVisible = simulateRlsProfilesSelect(pendingId);
+  assert.equal(pendingVisible.length, 1);
+  assert.equal(pendingVisible[0].id, pendingId);
+
+  // 3. Admin can view all profiles including pending signups
+  const adminVisible = simulateRlsProfilesSelect(adminId);
+  assert.equal(adminVisible.length, 3);
+  const adminPending = adminVisible.filter((p) => p.approval_status === 'pending');
+  assert.equal(adminPending.length, 1);
+});
+

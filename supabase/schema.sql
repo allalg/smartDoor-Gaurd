@@ -93,16 +93,18 @@ GRANT ALL ON public.spotify_oauth_states TO service_role;
 -- Helper function to check if current user is an admin
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS BOOLEAN
-LANGUAGE plpgsql
+LANGUAGE sql
 SECURITY DEFINER
 SET search_path = ''
+STABLE
 AS $$
-BEGIN
-  RETURN EXISTS (
+  SELECT EXISTS (
     SELECT 1 FROM public.profiles
-    WHERE id = auth.uid() AND role = 'admin'
+    WHERE id = auth.uid()
+      AND role = 'admin'
+      AND is_enabled = TRUE
+      AND approval_status = 'approved'
   );
-END;
 $$;
 
 REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC;
@@ -111,6 +113,7 @@ GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated, service_role;
 -- Profiles Policies
 CREATE POLICY "Users can view own profile or admins view all"
   ON public.profiles FOR SELECT
+  TO authenticated
   USING (auth.uid() = id OR public.is_admin());
 
 CREATE POLICY "Users can update own display_name"

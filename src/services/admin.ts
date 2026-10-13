@@ -108,6 +108,29 @@ export async function fetchAllUsers(): Promise<{ users: Profile[]; error: string
     return { users: [], error: 'Supabase not configured' };
   }
 
+  // 1. Secure backend access path: Call admin-actions Edge Function
+  // Verified on server as active admin, retrieves all profiles via service_role bypassing client RLS limits
+  try {
+    const { data: fnData, error: fnError } = await supabase.functions.invoke<{
+      success: boolean;
+      users?: Profile[];
+      error?: string;
+    }>('admin-actions', {
+      body: { action: 'list_users' },
+    });
+
+    if (!fnError && fnData?.success && Array.isArray(fnData.users)) {
+      const sanitizedUsers = fnData.users.map((u) => ({
+        ...u,
+        approval_status: u.approval_status || (u.is_enabled ? 'approved' : 'pending'),
+      }));
+      return { users: sanitizedUsers as Profile[], error: null };
+    }
+  } catch (fnErr) {
+    console.warn('[admin] admin-actions list_users exception, trying direct database query:', fnErr);
+  }
+
+  // 2. Direct database query fallback
   try {
     const { data, error } = await supabase
       .from('profiles')

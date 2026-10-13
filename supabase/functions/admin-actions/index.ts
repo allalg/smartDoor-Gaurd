@@ -13,9 +13,9 @@ const allowedOrigins = new Set([
 
 function getCorsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") ?? "";
-  const allowedOrigin = allowedOrigins.has(origin)
-    ? origin
-    : (Deno.env.get("FRONTEND_ORIGIN") || "http://localhost:5173");
+  const isVercel = origin.endsWith(".vercel.app") || origin.includes("localhost") || origin.includes("127.0.0.1");
+  const isAllowed = allowedOrigins.has(origin) || isVercel || !origin;
+  const allowedOrigin = isAllowed ? (origin || "*") : (Deno.env.get("FRONTEND_ORIGIN") || "http://localhost:5173");
 
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
@@ -131,6 +131,27 @@ serve(async (req: Request) => {
     }
 
     switch (action) {
+      case "list_users": {
+        // Enforced: Caller is already verified as an active, approved administrator
+        const { data: users, error: usersErr } = await adminClient
+          .from("profiles")
+          .select("id, display_name, role, is_enabled, approval_status, created_at")
+          .order("created_at", { ascending: false });
+
+        if (usersErr) {
+          console.error("[admin-actions] Error fetching users:", usersErr.message);
+          return new Response(
+            JSON.stringify({ success: false, error: "Database error fetching user directory" }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, users: users || [] }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       case "update_user_role": {
         const { targetUserId, newRole } = body;
 
