@@ -9,7 +9,7 @@ export interface Profile {
   approval_status: ApprovalStatus;
   created_at: string;
 }
-
+// user music
 export interface UserMusic {
   user_id: string; // references auth.users.id
   spotify_uri: string | null;
