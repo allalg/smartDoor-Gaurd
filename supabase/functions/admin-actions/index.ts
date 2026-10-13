@@ -12,13 +12,10 @@ const allowedOrigins = new Set([
 ].filter(Boolean));
 
 function getCorsHeaders(req: Request): Record<string, string> {
-  const origin = req.headers.get("Origin") ?? "";
-  const isVercel = origin.endsWith(".vercel.app") || origin.includes("localhost") || origin.includes("127.0.0.1");
-  const isAllowed = allowedOrigins.has(origin) || isVercel || !origin;
-  const allowedOrigin = isAllowed ? (origin || "*") : (Deno.env.get("FRONTEND_ORIGIN") || "http://localhost:5173");
+  const origin = req.headers.get("Origin") || "*";
 
   return {
-    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Vary": "Origin",
