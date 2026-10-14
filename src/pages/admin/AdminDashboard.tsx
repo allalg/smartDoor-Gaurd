@@ -1,8 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchAdminMetrics, fetchAllUsers, setUserApproval, type AdminMetrics } from '@/services/admin';
+import {
+  fetchAdminMetrics,
+  fetchAllUsers,
+  setUserApproval,
+  fetchIntrusionAlerts,
+  acknowledgeAlert,
+  type AdminMetrics,
+} from '@/services/admin';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-import type { Profile, EntryLog } from '@/types/database';
+import type { Profile, EntryLog, IntrusionAlert } from '@/types/database';
 import { formatDate, formatTimeAgo } from '@/lib/utils';
 import {
   Users,
@@ -20,6 +27,7 @@ import {
   Check,
   X,
   UserCheck,
+  Eye,
 } from 'lucide-react';
 
 export const AdminDashboard: React.FC = () => {
@@ -31,6 +39,7 @@ export const AdminDashboard: React.FC = () => {
     unacknowledgedAlerts: 0,
     recentEvents: [],
   });
+  const [alerts, setAlerts] = useState<IntrusionAlert[]>([]);
   const [pendingSignups, setPendingSignups] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -41,10 +50,15 @@ export const AdminDashboard: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const [metricsRes, usersRes] = await Promise.all([
+      const [metricsRes, usersRes, alertsRes] = await Promise.all([
         fetchAdminMetrics(),
         fetchAllUsers(),
+        fetchIntrusionAlerts(),
       ]);
+
+      if (alertsRes.alerts) {
+        setAlerts(alertsRes.alerts);
+      }
 
       const pending = usersRes.users
         ? usersRes.users.filter((u) => u.approval_status === 'pending')
@@ -58,6 +72,9 @@ export const AdminDashboard: React.FC = () => {
         if (usersRes.users && usersRes.users.length > 0) {
           syncedMetrics.totalUsers = Math.max(syncedMetrics.totalUsers, usersRes.users.length);
           syncedMetrics.pendingApprovals = pending.length;
+        }
+        if (alertsRes.alerts) {
+          syncedMetrics.unacknowledgedAlerts = alertsRes.alerts.filter((a) => !a.acknowledged_at).length;
         }
         setMetrics(syncedMetrics);
       }
@@ -103,15 +120,33 @@ export const AdminDashboard: React.FC = () => {
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'intrusion_alerts' },
-          () => {
-            fetchAdminMetrics().then((res) => {
-              if (res.metrics) {
+          (payload) => {
+            if (payload.eventType === 'INSERT') {
+              const newAlert = payload.new as IntrusionAlert;
+              setAlerts((prev) => [newAlert, ...prev.filter((a) => a.id !== newAlert.id)]);
+              setMetrics((prev) => ({
+                ...prev,
+                unacknowledgedAlerts: prev.unacknowledgedAlerts + 1,
+              }));
+            } else if (payload.eventType === 'UPDATE') {
+              const updated = payload.new as IntrusionAlert;
+              setAlerts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+              if (updated.acknowledged_at) {
                 setMetrics((prev) => ({
                   ...prev,
-                  unacknowledgedAlerts: res.metrics.unacknowledgedAlerts,
+                  unacknowledgedAlerts: Math.max(0, prev.unacknowledgedAlerts - 1),
                 }));
               }
-            });
+            } else {
+              fetchAdminMetrics().then((res) => {
+                if (res.metrics) {
+                  setMetrics((prev) => ({
+                    ...prev,
+                    unacknowledgedAlerts: res.metrics.unacknowledgedAlerts,
+                  }));
+                }
+              });
+            }
           }
         )
         .subscribe();
@@ -167,6 +202,28 @@ export const AdminDashboard: React.FC = () => {
       }
     } catch {
       setFeedback({ type: 'error', message: 'Failed to reject user' });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleAcknowledgeAlert = async (id: string) => {
+    setActionLoading(id);
+    try {
+      const res = await acknowledgeAlert(id);
+      if (!res.error) {
+        setAlerts((prev) =>
+          prev.map((a) =>
+            a.id === id
+              ? { ...a, acknowledged_at: new Date().toISOString(), notification_status: 'acknowledged' }
+              : a
+          )
+        );
+        setMetrics((prev) => ({
+          ...prev,
+          unacknowledgedAlerts: Math.max(0, prev.unacknowledgedAlerts - 1),
+        }));
+      }
     } finally {
       setActionLoading(null);
     }
@@ -414,6 +471,82 @@ export const AdminDashboard: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Active Security & Prolonged Presence Alerts Widget */}
+      {alerts.filter((a) => !a.acknowledged_at).length > 0 && (
+        <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-5 backdrop-blur-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-400 animate-pulse" />
+              <h3 className="text-sm font-semibold text-white">Active Security & Prolonged Presence Alerts</h3>
+              <span className="text-[10px] text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full border border-amber-500/30 font-mono">
+                {alerts.filter((a) => !a.acknowledged_at).length} Action Required
+              </span>
+            </div>
+            <Link
+              to="/admin/alerts"
+              className="text-xs text-amber-300 hover:text-amber-200 flex items-center gap-1 font-medium"
+            >
+              <span>View All Alerts</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+
+          <div className="divide-y divide-amber-500/20">
+            {alerts
+              .filter((a) => !a.acknowledged_at)
+              .slice(0, 4)
+              .map((alert) => {
+                const isPresence = alert.alert_type === 'prolonged_presence';
+                const isBusy = actionLoading === alert.id;
+
+                return (
+                  <div key={alert.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2 rounded-xl bg-amber-500/20 text-amber-300 mt-0.5 shrink-0">
+                        {isPresence ? <Eye className="h-4 w-4 text-purple-400" /> : <AlertTriangle className="h-4 w-4" />}
+                      </div>
+                      <div>
+                        <div className="text-white font-medium text-xs flex items-center gap-2 flex-wrap">
+                          <span>{alert.message}</span>
+                          {isPresence && (
+                            <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded border border-purple-500/30 font-mono flex items-center gap-1">
+                              <Eye className="h-3 w-3" />
+                              Prolonged Presence
+                            </span>
+                          )}
+                          <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                            {alert.severity}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono mt-0.5 flex items-center gap-2">
+                          <span>Device: {alert.device_id || 'esp32_door_01'}</span>
+                          <span>&bull;</span>
+                          <span>{formatTimeAgo(alert.created_at)}</span>
+                          {alert.duration_seconds && (
+                            <>
+                              <span>&bull;</span>
+                              <span className="text-purple-300">{alert.duration_seconds}s presence</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleAcknowledgeAlert(alert.id)}
+                      disabled={isBusy}
+                      className="self-end sm:self-center px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-colors flex items-center gap-1.5 shrink-0"
+                    >
+                      {isBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                      <span>Acknowledge</span>
+                    </button>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
 
       {/* Visual Analytics & Recent Events Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
