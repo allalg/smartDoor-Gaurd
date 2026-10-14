@@ -982,3 +982,312 @@ test('RLS policy simulation: Ordinary residents can only select own profile whil
   assert.equal(adminPending.length, 1);
 });
 
+// ============================================================================
+// 10. PROLONGED PRESENCE ALERTING & FIRMWARE TIMING SIMULATION TESTS
+// ============================================================================
+
+class PresenceTrackerSimulation {
+  constructor(thresholdMs = 60000, debounceGraceMs = 500) {
+    this.thresholdMs = thresholdMs;
+    this.debounceGraceMs = debounceGraceMs;
+    this.presenceTimerActive = false;
+    this.presenceStartTime = 0;
+    this.lastDetectionTime = 0;
+    this.presenceAlertSent = false;
+    this.alertsSent = [];
+  }
+
+  update(currentTimeMs, isDetected) {
+    if (isDetected) {
+      this.lastDetectionTime = currentTimeMs;
+      if (!this.presenceTimerActive) {
+        this.presenceTimerActive = true;
+        this.presenceStartTime = currentTimeMs;
+        this.presenceAlertSent = false;
+      }
+    }
+
+    // Check alert threshold
+    if (this.presenceTimerActive && isDetected) {
+      const elapsed = currentTimeMs - this.presenceStartTime;
+      if (elapsed >= this.thresholdMs && !this.presenceAlertSent) {
+        this.presenceAlertSent = true;
+        this.alertsSent.push({
+          time: currentTimeMs,
+          elapsedSeconds: Math.floor(elapsed / 1000),
+        });
+      }
+    }
+
+    // Check reset with debounce grace
+    if (this.presenceTimerActive && !isDetected && (currentTimeMs - this.lastDetectionTime) >= this.debounceGraceMs) {
+      this.presenceTimerActive = false;
+      this.presenceAlertSent = false;
+    }
+  }
+}
+
+test('Firmware presence timer: Under 60 seconds of presence triggers no alert', () => {
+  const tracker = new PresenceTrackerSimulation();
+  // Simulate 50 seconds of continuous presence
+  for (let t = 0; t <= 50000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 0, 'No alert before 60 seconds');
+});
+
+test('Firmware presence timer: Crossing 60 seconds triggers exactly one alert', () => {
+  const tracker = new PresenceTrackerSimulation();
+  // Simulate 70 seconds of continuous presence
+  for (let t = 0; t <= 70000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 1, 'Exactly one alert must be sent');
+  assert.equal(tracker.alertsSent[0].elapsedSeconds, 60);
+
+  // Continuing to stand there for another minute should NOT trigger repeated alerts
+  for (let t = 71000; t <= 120000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 1, 'Must not spam alerts during same presence episode');
+});
+
+test('Firmware presence timer: Debounce grace prevents false reset during momentary sensor flicker', () => {
+  const tracker = new PresenceTrackerSimulation(60000, 500);
+  // Presence for 30s
+  for (let t = 0; t <= 30000; t += 1000) {
+    tracker.update(t, true);
+  }
+
+  // Momentary flicker for 200ms (less than 500ms debounce grace)
+  tracker.update(30200, false);
+  assert.equal(tracker.presenceTimerActive, true, 'Timer must remain active during transient flicker');
+
+  // Resume presence up to 61s total from start
+  for (let t = 30300; t <= 61000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 1, 'Alert must still trigger as episode was continuous');
+});
+
+test('Firmware presence timer: Area clear > 500ms resets timer for next visitor', () => {
+  const tracker = new PresenceTrackerSimulation(60000, 500);
+  // Person 1 stands for 70s -> triggers alert
+  for (let t = 0; t <= 70000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 1);
+
+  // Person 1 leaves for 10 seconds
+  for (let t = 71000; t <= 80000; t += 1000) {
+    tracker.update(t, false);
+  }
+  assert.equal(tracker.presenceTimerActive, false, 'Timer reset after area cleared');
+
+  // Person 2 arrives at t = 81000 and stands for 65s
+  for (let t = 81000; t <= 146000; t += 1000) {
+    tracker.update(t, true);
+  }
+  assert.equal(tracker.alertsSent.length, 2, 'New visit must trigger a new alert once threshold is reached');
+});
+
+// ============================================================================
+// 11. REPORT-PRESENCE-ALERT EDGE FUNCTION VALIDATION & DEDUPLICATION TESTS
+// ============================================================================
+
+function simulateReportPresenceAlert({
+  headers,
+  body,
+  serverSecret = 'door-device-secret-12345',
+  existingAlerts = [],
+}) {
+  const deviceSecret = headers['x-device-secret'];
+  if (!deviceSecret || deviceSecret !== serverSecret) {
+    return { status: 403, success: false, error: 'Unauthorized device' };
+  }
+
+  const { device_id, duration_seconds } = body || {};
+  if (typeof device_id !== 'string' || !device_id.trim()) {
+    return { status: 400, success: false, error: 'Invalid or missing device_id' };
+  }
+
+  if (typeof duration_seconds !== 'number' || duration_seconds < 60 || duration_seconds > 86400) {
+    return { status: 400, success: false, error: 'Invalid duration_seconds (must be 60–86400)' };
+  }
+
+  // Deduplication check: 120s window
+  const now = Date.now();
+  const recentAlert = existingAlerts.find(
+    (a) => a.device_id === device_id &&
+           a.alert_type === 'prolonged_presence' &&
+           (now - new Date(a.created_at).getTime()) < 120000
+  );
+
+  if (recentAlert) {
+    return { status: 200, success: true, duplicate: true, existing_alert_id: recentAlert.id };
+  }
+
+  const severity = duration_seconds >= 300 ? 'critical' : duration_seconds >= 120 ? 'high' : 'medium';
+  const newAlert = {
+    id: 'alert-' + Math.random().toString(36).substring(2, 9),
+    entry_log_id: null,
+    severity,
+    message: `Prolonged presence detected at ${device_id} for ${Math.round(duration_seconds)}s`,
+    notification_status: 'pending',
+    alert_type: 'prolonged_presence',
+    device_id,
+    duration_seconds: Math.round(duration_seconds),
+    created_at: new Date(now).toISOString(),
+    acknowledged_at: null,
+  };
+
+  return { status: 200, success: true, alert: newAlert };
+}
+
+test('report-presence-alert: Rejects missing or invalid x-device-secret (HTTP 403)', () => {
+  const res1 = simulateReportPresenceAlert({
+    headers: {},
+    body: { device_id: 'esp32_door_01', duration_seconds: 65 },
+  });
+  assert.equal(res1.status, 403);
+  assert.equal(res1.error, 'Unauthorized device');
+
+  const res2 = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': 'wrong-secret' },
+    body: { device_id: 'esp32_door_01', duration_seconds: 65 },
+  });
+  assert.equal(res2.status, 403);
+});
+
+test('report-presence-alert: Rejects duration < 60 seconds or missing device_id (HTTP 400)', () => {
+  const secret = 'door-device-secret-12345';
+  const res1 = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: 'esp32_door_01', duration_seconds: 45 },
+  });
+  assert.equal(res1.status, 400);
+
+  const res2 = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: '', duration_seconds: 65 },
+  });
+  assert.equal(res2.status, 400);
+});
+
+test('report-presence-alert: Valid presence report inserts alert with null entry_log_id and correct severity', () => {
+  const secret = 'door-device-secret-12345';
+  // 60s -> medium
+  const resMedium = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: 'esp32_door_01', duration_seconds: 65 },
+  });
+  assert.equal(resMedium.status, 200);
+  assert.equal(resMedium.success, true);
+  assert.equal(resMedium.alert.severity, 'medium');
+  assert.equal(resMedium.alert.entry_log_id, null);
+  assert.equal(resMedium.alert.alert_type, 'prolonged_presence');
+  assert.equal(resMedium.alert.duration_seconds, 65);
+
+  // 150s -> high
+  const resHigh = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: 'esp32_door_01', duration_seconds: 150 },
+  });
+  assert.equal(resHigh.alert.severity, 'high');
+
+  // 350s -> critical
+  const resCritical = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: 'esp32_door_01', duration_seconds: 350 },
+  });
+  assert.equal(resCritical.alert.severity, 'critical');
+});
+
+test('report-presence-alert: Duplicate report within 120s window is suppressed gracefully', () => {
+  const secret = 'door-device-secret-12345';
+  const existingAlert = {
+    id: 'existing-alert-999',
+    device_id: 'esp32_door_01',
+    alert_type: 'prolonged_presence',
+    created_at: new Date(Date.now() - 30000).toISOString(), // 30s ago
+  };
+
+  const res = simulateReportPresenceAlert({
+    headers: { 'x-device-secret': secret },
+    body: { device_id: 'esp32_door_01', duration_seconds: 70 },
+    existingAlerts: [existingAlert],
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.duplicate, true);
+  assert.equal(res.existing_alert_id, 'existing-alert-999');
+});
+
+// ============================================================================
+// 12. ADMIN ACCESS LOG AUDIT & PROFILE RESOLUTION TESTS
+// ============================================================================
+
+test('admin-actions list_access_logs: Securely hydrates profiles for entry_logs', () => {
+  const db = new MockDatabase();
+  const adminId = '11111111-aaaa-bbbb-cccc-111111111111';
+  const residentId = '22222222-aaaa-bbbb-cccc-222222222222';
+
+  db.addProfile(adminId, 'Admin Officer', 'admin', true, 'approved');
+  db.addProfile(residentId, 'Alice Resident', 'user', true, 'approved');
+
+  const mockEntryLogs = [
+    {
+      id: 'log-1',
+      occurred_at: new Date().toISOString(),
+      user_id: residentId,
+      device_id: 'esp32_door_01',
+      result: 'success',
+      failure_reason: null,
+      request_id: '550e8400-e29b-41d4-a716-446655440001',
+      created_at: new Date().toISOString(),
+    },
+    {
+      id: 'log-2',
+      occurred_at: new Date().toISOString(),
+      user_id: null, // anonymous failure
+      device_id: 'esp32_door_01',
+      result: 'failure',
+      failure_reason: 'Invalid authentication session',
+      request_id: '550e8400-e29b-41d4-a716-446655440002',
+      created_at: new Date().toISOString(),
+    },
+  ];
+
+  function simulateListAccessLogs(callerProfile) {
+    if (!callerProfile) {
+      return { status: 401, error: 'Missing or invalid credentials' };
+    }
+    if (!callerProfile.is_enabled || callerProfile.approval_status !== 'approved') {
+      return { status: 403, error: 'Account access is suspended or awaiting approval' };
+    }
+    if (callerProfile.role !== 'admin') {
+      return { status: 403, error: 'Forbidden: Administrator role required' };
+    }
+
+    // Hydrate profiles
+    const hydrated = mockEntryLogs.map((log) => ({
+      ...log,
+      profile: log.user_id ? db.profiles.get(log.user_id) || null : null,
+    }));
+
+    return { status: 200, success: true, logs: hydrated };
+  }
+
+  // 1. Admin caller
+  const resAdmin = simulateListAccessLogs(db.profiles.get(adminId));
+  assert.equal(resAdmin.status, 200);
+  assert.equal(resAdmin.logs.length, 2);
+  assert.equal(resAdmin.logs[0].profile.display_name, 'Alice Resident');
+  assert.equal(resAdmin.logs[1].profile, null);
+
+  // 2. Resident caller rejected
+  const resResident = simulateListAccessLogs(db.profiles.get(residentId));
+  assert.equal(resResident.status, 403);
+});
+
+

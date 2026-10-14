@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchAdminMetrics, fetchAllUsers, setUserApproval, type AdminMetrics } from '@/services/admin';
-import type { Profile } from '@/types/database';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import type { Profile, EntryLog } from '@/types/database';
 import { formatDate, formatTimeAgo } from '@/lib/utils';
 import {
   Users,
@@ -69,6 +70,56 @@ export const AdminDashboard: React.FC = () => {
 
   useEffect(() => {
     loadData();
+
+    if (isSupabaseConfigured) {
+      const channel = supabase
+        .channel('admin-dashboard-realtime')
+        .on(
+          'postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'entry_logs' },
+          async (payload) => {
+            const newLog = payload.new as EntryLog;
+            if (newLog.user_id) {
+              try {
+                const { data: profile } = await supabase
+                  .from('profiles')
+                  .select('id, display_name, role')
+                  .eq('id', newLog.user_id)
+                  .maybeSingle();
+                if (profile) newLog.profile = profile;
+              } catch (e) {
+                console.warn('Realtime profile hydration error:', e);
+              }
+            }
+            const isSuccess = newLog.result === 'success' || newLog.result === 'granted';
+            setMetrics((prev) => ({
+              ...prev,
+              successfulEntries: isSuccess ? prev.successfulEntries + 1 : prev.successfulEntries,
+              failedEntries: !isSuccess ? prev.failedEntries + 1 : prev.failedEntries,
+              recentEvents: [newLog, ...prev.recentEvents.filter((e) => e.id !== newLog.id)].slice(0, 8),
+            }));
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'intrusion_alerts' },
+          () => {
+            fetchAdminMetrics().then((res) => {
+              if (res.metrics) {
+                setMetrics((prev) => ({
+                  ...prev,
+                  unacknowledgedAlerts: res.metrics.unacknowledgedAlerts,
+                }));
+              }
+            });
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
   }, []);
 
   const handleApprove = async (user: Profile) => {
@@ -456,10 +507,13 @@ export const AdminDashboard: React.FC = () => {
                         <XCircle className="h-4 w-4 text-rose-400 shrink-0" />
                       )}
                       <div>
-                        <div className="text-slate-200 font-sans font-medium">
-                          {isGranted ? 'Access Granted' : 'Access Denied'}
+                        <div className="text-slate-200 font-sans font-medium flex items-center gap-1.5 flex-wrap">
+                          {event.profile?.display_name && (
+                            <span className="text-white font-semibold">{event.profile.display_name}:</span>
+                          )}
+                          <span>{isGranted ? 'Access Granted' : 'Access Denied'}</span>
                           {event.failure_reason && (
-                            <span className="text-rose-400 text-xs ml-2 font-normal">
+                            <span className="text-rose-400 text-xs font-normal">
                               ({event.failure_reason})
                             </span>
                           )}

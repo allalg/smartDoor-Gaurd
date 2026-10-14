@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchAllAccessLogs } from '@/services/access-history';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import type { EntryLog } from '@/types/database';
 import { formatDate, formatTimeAgo } from '@/lib/utils';
 import {
@@ -40,6 +41,38 @@ export const AdminAccessLogs: React.FC = () => {
 
   useEffect(() => {
     loadLogs();
+
+    if (isSupabaseConfigured) {
+      const channel = supabase
+        .channel('admin-entry-logs-live')
+        .on(
+          'postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'entry_logs' },
+          async (payload) => {
+            const newLog = payload.new as EntryLog;
+            if (newLog.user_id) {
+              try {
+                const { data: profile } = await supabase
+                  .from('profiles')
+                  .select('id, display_name, role')
+                  .eq('id', newLog.user_id)
+                  .maybeSingle();
+                if (profile) {
+                  newLog.profile = profile;
+                }
+              } catch (pErr) {
+                console.warn('Could not hydrate profile for realtime log:', pErr);
+              }
+            }
+            setLogs((prev) => [newLog, ...prev.filter((l) => l.id !== newLog.id)]);
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
   }, []);
 
   const filteredLogs = logs.filter((log) => {
@@ -60,7 +93,13 @@ export const AdminAccessLogs: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Audit Access Logs</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-white tracking-tight">Audit Access Logs</h1>
+            <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 font-mono">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              Realtime Active
+            </span>
+          </div>
           <p className="text-xs text-slate-400 mt-1">
             Complete physical access audit trail stored in the <code>entry_logs</code> table
           </p>

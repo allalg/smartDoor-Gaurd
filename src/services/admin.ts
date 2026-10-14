@@ -57,13 +57,32 @@ export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; erro
     if (alertsErr) console.warn('Alerts count error:', alertsErr.message);
 
     // 5. Recent events
+    let recentEventsList: EntryLog[] = [];
     const { data: recent, error: recentErr } = await supabase
       .from('entry_logs')
       .select('id, occurred_at, user_id, device_id, result, failure_reason, request_id, created_at')
       .order('occurred_at', { ascending: false })
       .limit(8);
 
-    if (recentErr) console.warn('Recent events error:', recentErr.message);
+    if (recentErr) {
+      console.warn('Recent events error:', recentErr.message);
+    } else if (recent) {
+      recentEventsList = recent as EntryLog[];
+      const userIds = Array.from(new Set(recentEventsList.map((l) => l.user_id).filter(Boolean))) as string[];
+      if (userIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from('profiles')
+          .select('id, display_name, role')
+          .in('id', userIds);
+        if (profiles && profiles.length > 0) {
+          const profileMap = new Map(profiles.map((p) => [p.id, p]));
+          recentEventsList = recentEventsList.map((log) => ({
+            ...log,
+            profile: log.user_id ? profileMap.get(log.user_id) || null : null,
+          }));
+        }
+      }
+    }
 
     // 1b. Pending approvals count
     let pendingCount = 0;
@@ -93,7 +112,7 @@ export async function fetchAdminMetrics(): Promise<{ metrics: AdminMetrics; erro
         successfulEntries: successCount ?? 0,
         failedEntries: failedCount ?? 0,
         unacknowledgedAlerts: alertsCount ?? 0,
-        recentEvents: (recent as EntryLog[]) || [],
+        recentEvents: recentEventsList,
       },
       error: null,
     };
@@ -259,7 +278,7 @@ export async function fetchIntrusionAlerts(): Promise<{ alerts: IntrusionAlert[]
     const { data, error } = await supabase
       .from('intrusion_alerts')
       .select(`
-        id, entry_log_id, severity, message, notification_status, acknowledged_at, created_at,
+        id, entry_log_id, severity, message, notification_status, alert_type, device_id, duration_seconds, acknowledged_at, created_at,
         entry_log:entry_logs(id, occurred_at, user_id, device_id, result, failure_reason)
       `)
       .order('created_at', { ascending: false });
@@ -268,7 +287,7 @@ export async function fetchIntrusionAlerts(): Promise<{ alerts: IntrusionAlert[]
       // Fallback without relation
       const fallback = await supabase
         .from('intrusion_alerts')
-        .select('id, entry_log_id, severity, message, notification_status, acknowledged_at, created_at')
+        .select('id, entry_log_id, severity, message, notification_status, alert_type, device_id, duration_seconds, acknowledged_at, created_at')
         .order('created_at', { ascending: false });
 
       if (fallback.error) return { alerts: [], error: fallback.error.message };

@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS public.intrusion_alerts (
   severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
   message TEXT NOT NULL,
   notification_status TEXT NOT NULL DEFAULT 'pending' CHECK (notification_status IN ('pending', 'sent', 'failed', 'acknowledged')),
+  alert_type TEXT NOT NULL DEFAULT 'auth_failure' CHECK (alert_type IN ('auth_failure', 'prolonged_presence')),
+  device_id TEXT,
+  duration_seconds INTEGER,
   acknowledged_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );

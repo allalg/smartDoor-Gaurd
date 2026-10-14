@@ -42,11 +42,12 @@ export interface EntryLog {
   request_id: string | null;
   created_at: string;
   // Joined profile for display in admin/logs
-  profile?: Profile | null;
+  profile?: Partial<Profile> | null;
 }
 
 export type AlertSeverity = 'low' | 'medium' | 'high' | 'critical';
 export type NotificationStatus = 'pending' | 'sent' | 'failed' | 'acknowledged';
+export type AlertType = 'auth_failure' | 'prolonged_presence';
 
 export interface IntrusionAlert {
   id: string;
@@ -54,6 +55,9 @@ export interface IntrusionAlert {
   severity: AlertSeverity;
   message: string;
   notification_status: NotificationStatus;
+  alert_type?: AlertType;
+  device_id?: string | null;
+  duration_seconds?: number | null;
   acknowledged_at: string | null;
   created_at: string;
   // Joined entry log for alert details

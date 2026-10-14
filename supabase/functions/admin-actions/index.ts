@@ -380,6 +380,53 @@ serve(async (req: Request) => {
         );
       }
 
+      case "list_access_logs": {
+        const limit = typeof body.limit === "number" && body.limit > 0 && body.limit <= 500
+          ? Math.floor(body.limit)
+          : 100;
+
+        const { data: logsData, error: logsErr } = await adminClient
+          .from("entry_logs")
+          .select("id, occurred_at, user_id, device_id, result, failure_reason, request_id, created_at")
+          .order("occurred_at", { ascending: false })
+          .limit(limit);
+
+        if (logsErr) {
+          console.error("[admin-actions] Error fetching entry_logs:", logsErr.message);
+          return new Response(
+            JSON.stringify({ success: false, error: "Database error fetching access logs" }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const logs = logsData ?? [];
+        const userIds = Array.from(new Set(logs.map((l) => l.user_id).filter(Boolean)));
+
+        const profileMap = new Map<string, { id: string; display_name: string | null; role: string }>();
+        if (userIds.length > 0) {
+          const { data: profilesData } = await adminClient
+            .from("profiles")
+            .select("id, display_name, role")
+            .in("id", userIds);
+
+          if (profilesData) {
+            for (const p of profilesData) {
+              profileMap.set(p.id, p);
+            }
+          }
+        }
+
+        const logsWithProfile = logs.map((log) => ({
+          ...log,
+          profile: log.user_id ? profileMap.get(log.user_id) || null : null,
+        }));
+
+        return new Response(
+          JSON.stringify({ success: true, logs: logsWithProfile }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
           JSON.stringify({ success: false, error: `Unsupported administrative action: '${action}'` }),
