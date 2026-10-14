@@ -32,6 +32,10 @@ const char *VERIFY_URL =
 const char *PRESENCE_ALERT_URL =
   "https://kruxomreotxjjyuiafun.supabase.co/functions/v1/report-presence-alert";
 
+// Supabase anon key for API gateway authentication
+const char *SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtydXhvbXJlb3R4amp5dWlhZnVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE3OTAwOTcsImV4cCI6MjEwNzM2NjA5N30.NTH9Csm5m3j9ff8ozzWgyj5SHRuX8q-pY6hQaSbhjvs";
+
 const char *DEVICE_ID = "esp32_door_01";
 
 // =====================================================
@@ -275,6 +279,10 @@ void verifyRequest(const char *json) {
   }
 
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  char authHeader[260] = {0};
+  snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", authHeader);
   http.addHeader("x-device-secret", DEVICE_SECRET);
   http.addHeader("Connection", "close");
 
@@ -390,6 +398,10 @@ void sendPresenceAlert(unsigned long elapsedMs) {
   }
 
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  char authHeader[260] = {0};
+  snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", authHeader);
   http.addHeader("x-device-secret", DEVICE_SECRET);
   http.addHeader("Connection", "close");
 
@@ -420,6 +432,9 @@ void sendPresenceAlert(unsigned long elapsedMs) {
     presenceAlertSent = true;
     presenceAlertRetryAfter = 0;
     Serial.println("[Presence] Device rejected by server — check DEVICE_SECRET");
+  } else if (httpCode == 404) {
+    Serial.println("[Presence] Function not deployed on Supabase (HTTP 404). Please deploy: supabase functions deploy report-presence-alert");
+    presenceAlertRetryAfter = millis() + 60000;
   } else {
     Serial.printf("[Presence] Server rejected: %s\n", response.c_str());
     presenceAlertRetryAfter = millis() + 15000;
