@@ -301,7 +301,7 @@ serve(async (req: Request) => {
     // 9. Fetch preferred Spotify soundtrack from user_music
     const { data: musicData, error: musicErr } = await adminClient
       .from("user_music")
-      .select("spotify_uri")
+      .select("spotify_uri, track_title, artist_name, album_name")
       .eq("user_id", userProfile.id)
       .maybeSingle();
 
@@ -314,15 +314,15 @@ serve(async (req: Request) => {
     // 10. Direct Spotify playback via Spotify Web API (completely fail-safe, isolated from physical unlock)
     if (musicData?.spotify_uri && musicData.spotify_uri.startsWith("spotify:track:")) {
       try {
-        console.log(`[verify-door-auth] Triggering direct Spotify playback for user: ${userProfile.id}`);
+        console.log(`[verify-door-auth] Triggering direct Spotify playback for user: ${userProfile.id}, track: ${musicData.spotify_uri}`);
         const playbackRes = await playTrackDirect(adminClient, musicData.spotify_uri, {
           timeoutMs: 2500, // 2.5s bounded timeout ensures ESP32 unlock response is never delayed
         });
-        musicTriggered = playbackRes.success;
-        if (!playbackRes.success) {
-          console.warn("[verify-door-auth] Direct Spotify playback not started:", playbackRes.error);
+        musicTriggered = Boolean(playbackRes.success && playbackRes.verified);
+        if (!playbackRes.success || !playbackRes.verified) {
+          console.warn("[verify-door-auth] Direct Spotify playback not verified:", playbackRes.error || "Playback could not be verified");
         } else {
-          console.log(`[verify-door-auth] Direct Spotify playback initiated on: ${playbackRes.deviceName || playbackRes.deviceId}`);
+          console.log(`[verify-door-auth] Direct Spotify playback verified playing on: ${playbackRes.deviceName || playbackRes.deviceId}`);
         }
       } catch (playbackErr) {
         // Music failure or timeout must NEVER delay or prevent physical door access

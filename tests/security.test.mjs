@@ -644,64 +644,163 @@ test('entry_logs_result_check constraint: Validates result must be "success" or 
 });
 
 test('verify-door-auth inserts: All entry_logs writes use "success" or "failure" while preserving response contract', () => {
-  // Simulates verify-door-auth logic
-  function simulateVerifyDoorAuth({ sessionValid, isReplay, isExpired, profileFound, profileEnabled }) {
-    let failureReason = null;
-    let entryLogResult = null;
-    let httpResponse = null;
+  const allowedResults = new Set(['success', 'failure']);
 
-    if (!sessionValid || isReplay || isExpired) {
-      if (!sessionValid) failureReason = "Invalid authentication session";
-      else if (isReplay) failureReason = "Replay detected: Token already consumed";
-      else if (isExpired) failureReason = "Authentication token expired";
-
-      entryLogResult = "failure";
-      httpResponse = { verified: false, decision: "denied", reason: failureReason };
-      return { entryLogResult, httpResponse };
+  function validateConstraint(row) {
+    if (!allowedResults.has(row.result)) {
+      throw new Error(`new row for relation "entry_logs" violates check constraint "entry_logs_result_check" (value: ${row.result})`);
     }
-
-    if (!profileFound) {
-      entryLogResult = "failure";
-      httpResponse = { verified: false, decision: "denied", reason: "Profile not found" };
-      return { entryLogResult, httpResponse };
-    }
-
-    if (!profileEnabled) {
-      entryLogResult = "failure";
-      httpResponse = { verified: false, decision: "denied", reason: "User account suspended" };
-      return { entryLogResult, httpResponse };
-    }
-
-    // Success path
-    entryLogResult = "success";
-    httpResponse = { verified: true, decision: "granted" };
-    return { entryLogResult, httpResponse };
+    return true;
   }
 
-  // Path A: Successful authorization
-  const ok = simulateVerifyDoorAuth({ sessionValid: true, isReplay: false, isExpired: false, profileFound: true, profileEnabled: true });
-  assert.equal(ok.entryLogResult, 'success', 'Successful auth must insert result: "success"');
-  assert.equal(ok.httpResponse.decision, 'granted', 'ESP32 response decision must remain "granted"');
+  // Simulates verify-door-auth logic matching production Edge Function
+  function simulateVerifyDoorAuth({ sessionState, tokenMatch = true, profile }) {
+    let failureReason = null;
+    let entryLog = null;
+    let httpResponse = null;
 
-  // Path B: Token expired
-  const expired = simulateVerifyDoorAuth({ sessionValid: true, isReplay: false, isExpired: true, profileFound: true, profileEnabled: true });
-  assert.equal(expired.entryLogResult, 'failure', 'Expired token must insert result: "failure"');
-  assert.equal(expired.httpResponse.decision, 'denied', 'ESP32 response decision must remain "denied"');
+    if (!sessionState || !tokenMatch || sessionState.consumed_at !== null || (sessionState.expires_at && new Date(sessionState.expires_at) <= new Date())) {
+      if (!sessionState) {
+        failureReason = "Invalid authentication session";
+      } else if (!tokenMatch) {
+        failureReason = "Invalid authentication token";
+      } else if (sessionState.consumed_at !== null) {
+        failureReason = "Replay detected: Token already consumed";
+      } else {
+        failureReason = "Authentication token expired";
+      }
 
-  // Path C: Replay detected
-  const replay = simulateVerifyDoorAuth({ sessionValid: true, isReplay: true, isExpired: false, profileFound: true, profileEnabled: true });
-  assert.equal(replay.entryLogResult, 'failure', 'Replay attempt must insert result: "failure"');
-  assert.equal(replay.httpResponse.decision, 'denied');
+      entryLog = {
+        user_id: sessionState?.user_id ?? null,
+        device_id: 'esp32_door_01',
+        result: 'failure',
+        failure_reason: failureReason,
+      };
+      validateConstraint(entryLog);
 
-  // Path D: Suspended user
-  const suspended = simulateVerifyDoorAuth({ sessionValid: true, isReplay: false, isExpired: false, profileFound: true, profileEnabled: false });
-  assert.equal(suspended.entryLogResult, 'failure', 'Suspended user must insert result: "failure"');
-  assert.equal(suspended.httpResponse.decision, 'denied');
+      httpResponse = { verified: false, decision: "denied", reason: failureReason };
+      return { entryLog, httpResponse };
+    }
 
-  // Path E: Missing profile
-  const missing = simulateVerifyDoorAuth({ sessionValid: true, isReplay: false, isExpired: false, profileFound: false, profileEnabled: true });
-  assert.equal(missing.entryLogResult, 'failure', 'Missing profile must insert result: "failure"');
-  assert.equal(missing.httpResponse.decision, 'denied');
+    if (!profile) {
+      entryLog = {
+        user_id: sessionState.user_id,
+        device_id: 'esp32_door_01',
+        result: 'failure',
+        failure_reason: "Profile not found or inaccessible",
+      };
+      validateConstraint(entryLog);
+
+      httpResponse = { verified: false, decision: "denied", reason: "Profile not found" };
+      return { entryLog, httpResponse };
+    }
+
+    if (!profile.is_enabled || profile.approval_status !== "approved") {
+      failureReason = profile.approval_status === "pending"
+        ? "Account awaiting administrator approval"
+        : profile.approval_status === "rejected"
+        ? "Account registration rejected"
+        : "Account suspended by administrator";
+
+      entryLog = {
+        user_id: profile.id,
+        device_id: 'esp32_door_01',
+        result: 'failure',
+        failure_reason: failureReason,
+      };
+      validateConstraint(entryLog);
+
+      httpResponse = { verified: false, decision: "denied", reason: failureReason };
+      return { entryLog, httpResponse };
+    }
+
+    // Success path: Granted entry
+    entryLog = {
+      user_id: profile.id,
+      device_id: 'esp32_door_01',
+      result: 'success',
+      failure_reason: null,
+    };
+    validateConstraint(entryLog);
+
+    httpResponse = {
+      verified: true,
+      decision: "granted",
+      user_id: profile.id,
+      display_name: profile.display_name,
+    };
+    return { entryLog, httpResponse };
+  }
+
+  const validSession = { user_id: 'usr-1', expires_at: new Date(Date.now() + 60000).toISOString(), consumed_at: null };
+  const approvedProfile = { id: 'usr-1', display_name: 'Resident A', is_enabled: true, approval_status: 'approved' };
+
+  // Branch 1: Invalid authentication session (not found in DB)
+  const b1 = simulateVerifyDoorAuth({ sessionState: null });
+  assert.equal(b1.entryLog.result, 'failure');
+  assert.equal(b1.httpResponse.decision, 'denied');
+  assert.equal(b1.httpResponse.reason, 'Invalid authentication session');
+
+  // Branch 2: Invalid authentication token (OTP hash mismatch)
+  const b2 = simulateVerifyDoorAuth({ sessionState: validSession, tokenMatch: false });
+  assert.equal(b2.entryLog.result, 'failure');
+  assert.equal(b2.httpResponse.decision, 'denied');
+  assert.equal(b2.httpResponse.reason, 'Invalid authentication token');
+
+  // Branch 3: Replay attack detected (consumed_at is set)
+  const b3 = simulateVerifyDoorAuth({
+    sessionState: { ...validSession, consumed_at: new Date().toISOString() },
+  });
+  assert.equal(b3.entryLog.result, 'failure');
+  assert.equal(b3.httpResponse.decision, 'denied');
+  assert.equal(b3.httpResponse.reason, 'Replay detected: Token already consumed');
+
+  // Branch 4: Authentication token expired
+  const b4 = simulateVerifyDoorAuth({
+    sessionState: { ...validSession, expires_at: new Date(Date.now() - 5000).toISOString() },
+  });
+  assert.equal(b4.entryLog.result, 'failure');
+  assert.equal(b4.httpResponse.decision, 'denied');
+  assert.equal(b4.httpResponse.reason, 'Authentication token expired');
+
+  // Branch 5: User profile not found
+  const b5 = simulateVerifyDoorAuth({ sessionState: validSession, profile: null });
+  assert.equal(b5.entryLog.result, 'failure');
+  assert.equal(b5.httpResponse.decision, 'denied');
+  assert.equal(b5.httpResponse.reason, 'Profile not found');
+
+  // Branch 6: Account pending administrator approval
+  const b6 = simulateVerifyDoorAuth({
+    sessionState: validSession,
+    profile: { ...approvedProfile, approval_status: 'pending' },
+  });
+  assert.equal(b6.entryLog.result, 'failure');
+  assert.equal(b6.httpResponse.decision, 'denied');
+  assert.equal(b6.httpResponse.reason, 'Account awaiting administrator approval');
+
+  // Branch 7: Account registration rejected
+  const b7 = simulateVerifyDoorAuth({
+    sessionState: validSession,
+    profile: { ...approvedProfile, approval_status: 'rejected' },
+  });
+  assert.equal(b7.entryLog.result, 'failure');
+  assert.equal(b7.httpResponse.decision, 'denied');
+  assert.equal(b7.httpResponse.reason, 'Account registration rejected');
+
+  // Branch 8: Account suspended / disabled
+  const b8 = simulateVerifyDoorAuth({
+    sessionState: validSession,
+    profile: { ...approvedProfile, is_enabled: false },
+  });
+  assert.equal(b8.entryLog.result, 'failure');
+  assert.equal(b8.httpResponse.decision, 'denied');
+  assert.equal(b8.httpResponse.reason, 'Account suspended by administrator');
+
+  // Branch 9: Successful verification (Access Granted)
+  const b9 = simulateVerifyDoorAuth({ sessionState: validSession, profile: approvedProfile });
+  assert.equal(b9.entryLog.result, 'success', 'Successful auth must insert result: "success"');
+  assert.equal(b9.httpResponse.decision, 'granted', 'ESP32 response decision must remain "granted"');
+  assert.equal(b9.httpResponse.verified, true);
 });
 
 // ============================================================================

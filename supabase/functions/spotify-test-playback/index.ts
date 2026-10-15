@@ -47,12 +47,15 @@ serve(async (req: Request) => {
       );
     }
 
+    const albumUri = body.album_uri || body.albumUri;
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
     const adminClient = createClient(supabaseUrl, supabaseServiceKey);
 
     const playbackResult = await playTrackDirect(adminClient, trackUri, {
       preferredDeviceName: preferredDevice,
+      albumUri: albumUri,
       timeoutMs: 4000,
     });
 
